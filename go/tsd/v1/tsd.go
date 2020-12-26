@@ -15,14 +15,21 @@
 package tsd
 
 import (
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	CycleKeysMax       = 100000
-	CycleUnitMax int64 = 3600
-	CycleUnitMin int64 = 1
+	CycleKeysMax                    = 100000
+	CycleUnitMax              int64 = 3600
+	CycleUnitMin              int64 = 1
+	cycleExportOptionsTimeMax int64 = 31 * 86400
+)
+
+const (
+	ValueAttrSum uint64 = 1 << 2
 )
 
 var (
@@ -62,8 +69,8 @@ func (it *CycleFeed) Entry(name string) *CycleEntry {
 	return entry
 }
 
-func (it *CycleFeed) Sync(name string, key, value int64, add bool) {
-	it.Entry(name).Sync(key, value, add)
+func (it *CycleFeed) Sync(name string, key, value int64, attrs uint64) {
+	it.Entry(name).Sync(key, value, attrs)
 }
 
 func (it *CycleFeed) Trim(sec int64) {
@@ -110,7 +117,31 @@ func (it *CycleEntry) add(key, value int64) {
 	it.Values = append(it.Values, value)
 }
 
-func (it *CycleEntry) Sync(key, value int64, add bool) {
+func (it *CycleEntry) set(keys []int64, key, value int64, attrs uint64) {
+	if len(keys) > 0 {
+
+		for i := 0; i < len(keys)-1; i++ {
+			if key >= keys[i] && key < keys[i+1] {
+				if u64Allow(it.Attrs|attrs, ValueAttrSum) {
+					it.Values[i] += value
+				} else {
+					it.Values[i] = value
+				}
+				return
+			}
+		}
+
+		if key >= keys[len(keys)-1] {
+			if u64Allow(it.Attrs|attrs, ValueAttrSum) {
+				it.Values[len(keys)-1] += value
+			} else {
+				it.Values[len(keys)-1] = value
+			}
+		}
+	}
+}
+
+func (it *CycleEntry) Sync(key, value int64, attrs uint64) {
 
 	var kt time.Time
 
@@ -129,7 +160,7 @@ func (it *CycleEntry) Sync(key, value int64, add bool) {
 		key -= int64(kt.Minute()) * 60
 		key -= int64(kt.Second())
 	} else if it.Unit >= 60 {
-		key -= (int64(kt.Minute()) % (it.Unit / 60)) * 60
+		key -= (int64(kt.Minute()*60) % it.Unit)
 		key -= int64(kt.Second())
 	} else {
 		key -= int64(kt.Second()) % it.Unit
@@ -145,7 +176,7 @@ func (it *CycleEntry) Sync(key, value int64, add bool) {
 		}
 
 		if key == it.Keys[i] {
-			if add {
+			if u64Allow(it.Attrs|attrs, ValueAttrSum) {
 				it.Values[i] += value
 			} else {
 				it.Values[i] = value
@@ -167,64 +198,135 @@ func (it *CycleEntry) Sync(key, value int64, add bool) {
 	}
 }
 
-type CycleTimeExportZone int
+func NewCycleExportOptionsFromHttp(req *http.Request) *CycleExportOptions {
 
-type CycleTimeExportUnit int64
+	var (
+		opts = &CycleExportOptions{}
+		ar   = req.URL.Query()
+	)
 
-func (it *CycleFeed) Export(args ...interface{}) *CycleFeed {
+	for k, v := range ar {
+		if len(v) < 1 {
+			continue
+		}
+		vs := v[len(v)-1]
+
+		switch k {
+		case "names":
+			opts.Names = strings.Split(strings.ToLower(vs), ",")
+
+		case "time_start":
+			opts.TimeStart = parstInt(vs, 0)
+
+		case "time_end":
+			opts.TimeEnd = parstInt(vs, 0)
+
+		case "time_unit":
+			opts.TimeUnit = parstInt(vs, 0)
+
+		case "time_zone":
+			opts.TimeZone = parstInt(vs, 0)
+
+		case "time_recent":
+			tr := parstInt(vs, 0)
+			if tr < 10 {
+				tr = 10
+			}
+			opts.TimeEnd = time.Now().Unix()
+			opts.TimeStart = opts.TimeEnd - tr
+		}
+	}
+
+	return opts.reset()
+}
+
+func (it *CycleExportOptions) reset() *CycleExportOptions {
+
+	tn := time.Now()
+
+	if it.TimeStart > 0 {
+		it.TimeStart = varUnixSecondFilter(it.TimeStart, 0, tn.Unix())
+	}
+
+	if it.TimeEnd > 0 {
+		it.TimeEnd = varUnixSecondFilter(it.TimeEnd, 0, tn.Unix())
+	}
+
+	if (it.TimeStart + cycleExportOptionsTimeMax) < it.TimeEnd {
+		it.TimeStart = it.TimeEnd - cycleExportOptionsTimeMax
+	}
+
+	if it.TimeZone < -11 {
+		it.TimeZone = -11
+	} else if it.TimeZone > 11 {
+		it.TimeZone = 11
+	}
+
+	if it.TimeUnit == 0 {
+		it.TimeUnit = 10
+	} else if it.TimeUnit < 10 {
+		it.TimeUnit = 10
+	} else if it.TimeUnit > 86400 {
+		it.TimeUnit = 86400
+	}
+
+	return it
+}
+
+func (it *CycleFeed) Export(opts *CycleExportOptions) *CycleFeed {
 
 	cycleFeedMU.Lock()
 	defer cycleFeedMU.Unlock()
 
-	var (
-		unit int64 = 0
-		tzz        = time.UTC
-	)
-
-	for _, arg := range args {
-
-		switch arg.(type) {
-
-		case CycleTimeExportZone:
-			tz := int(arg.(CycleTimeExportZone))
-			if tz < -11 {
-				tz = -11
-			} else if tz > 11 {
-				tz = 11
-			}
-			if tz != 0 {
-				tzz = time.FixedZone("CST", (tz * 3600))
-			}
-
-		case CycleTimeExportUnit:
-			unit = int64(arg.(CycleTimeExportUnit))
-			if unit < 1 {
-				unit = 1
-			} else if unit > 86400 {
-				unit = 86400
-			}
+	if opts == nil {
+		opts = &CycleExportOptions{
+			TimeUnit: 60,
 		}
 	}
 
+	opts.reset()
+
+	tzz := time.Local
+	if opts.TimeZone != 0 {
+		tzz = time.FixedZone("CST", int(opts.TimeZone*3600))
+	}
+
 	var (
-		unitDay    int64 = 0
-		unitHour   int64 = 0
-		unitMinute int64 = 0
+		feed = &CycleFeed{
+			Unit: opts.TimeUnit,
+			Keys: []int64{},
+		}
+		timeStart = time.Unix(opts.TimeStart, 0).In(tzz)
 	)
 
-	if unit >= 86400 {
-		unitDay = unit / 86400
-	} else if unit >= 3600 {
-		unitHour = unit / 3600
-	} else {
-		unitMinute = unit / 60
-		if unitMinute < 1 {
-			unitMinute = 1
+	if fix := int64(timeStart.Second()) % opts.TimeUnit; fix > 0 {
+		opts.TimeStart -= fix
+	}
+
+	if opts.TimeUnit >= 60 {
+		if fix := int64(timeStart.Minute()*60) % opts.TimeUnit; fix > 0 {
+			opts.TimeStart -= fix
 		}
 	}
 
-	feed := &CycleFeed{
-		Unit: unit,
+	if opts.TimeUnit >= 3600 {
+		if fix := int64(timeStart.Hour()*3600) % opts.TimeUnit; fix > 0 {
+			opts.TimeStart -= fix
+		}
+	}
+
+	if opts.TimeUnit >= 86400 {
+		if fix := int64(timeStart.Day()*86400) % opts.TimeUnit; fix > 0 {
+			opts.TimeStart -= fix
+		}
+	}
+
+	for k := opts.TimeStart; k <= opts.TimeEnd; k += opts.TimeUnit {
+		feed.Keys = append(feed.Keys, k)
+	}
+
+	if len(feed.Keys) == 0 {
+		return feed
 	}
 
 	for _, v := range it.Items {
@@ -233,44 +335,26 @@ func (it *CycleFeed) Export(args ...interface{}) *CycleFeed {
 			continue
 		}
 
+		if len(opts.Names) > 0 && !arrayStringHas(opts.Names, v.Name) {
+			continue
+		}
+
 		entry := &CycleEntry{
-			Name: v.Name,
-			Unit: unit,
+			Name:   v.Name,
+			Values: make([]int64, len(feed.Keys)),
+			Attrs:  v.Attrs,
 		}
 
 		for j, k1 := range v.Keys {
 
-			kt := time.Unix(k1, 0).In(tzz)
-
-			k1 = int64(kt.Year()) * 10000
-			k1 += int64(kt.Month()) * 100
-			k1 += int64(kt.Day())
-
-			if unitDay > 0 {
-				if fix := int64(kt.Day()) % unitDay; fix > 0 {
-					k1 -= fix
-				}
-			} else if unitHour > 0 {
-				k1 *= 100
-				k1 += int64(kt.Hour())
-				if fix := int64(kt.Hour()) % unitHour; fix > 0 {
-					k1 -= fix
-				}
-			} else {
-				k1 *= 10000
-				k1 += int64(kt.Hour()) * 100
-				k1 += int64(kt.Minute())
-				if fix := int64(kt.Minute()) % unitMinute; fix > 0 {
-					k1 -= fix
-				}
+			if k1 < opts.TimeStart || k1 > opts.TimeEnd {
+				continue
 			}
 
-			entry.add(k1, v.Values[j])
+			entry.set(feed.Keys, k1, v.Values[j], 0)
 		}
 
-		if len(entry.Keys) > 0 {
-			feed.Items = append(feed.Items, entry)
-		}
+		feed.Items = append(feed.Items, entry)
 	}
 
 	return feed

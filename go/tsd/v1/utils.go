@@ -12,33 +12,45 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-syntax = "proto3";
+package tsd
 
-package valuedig.tsd.v1;
+import (
+	"strconv"
+)
 
-option optimize_for = LITE_RUNTIME;
-option go_package = ".;tsd";
-
-
-message CycleFeed {
-	int64               unit = 2;
-	repeated CycleEntry items = 3;
-	repeated string labels = 4;
-	repeated int64 keys = 9;
+func arrayStringHas(ar []string, s string) bool {
+	for _, v := range ar {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
-message CycleEntry {
-	string                      name  = 1;
-	int64               unit = 2;
-	repeated int64 keys = 9;
-	repeated int64 values = 10;
-	uint64 attrs = 11;
+func u64Allow(opbase, op uint64) bool {
+	return (op & opbase) == op
 }
 
-message CycleExportOptions {
-	repeated string names = 1;
-	int64 time_unit = 2;
-	int64 time_start = 3;
-	int64 time_end = 4;
-	int64 time_zone = 5;
+func u64Remove(opbase, op uint64) uint64 {
+	return (opbase | op) - (op)
+}
+
+func u64Append(opbase, op uint64) uint64 {
+	return (opbase | op)
+}
+
+func parstInt(str string, def int64) int64 {
+	if v, err := strconv.ParseInt(str, 10, 32); err == nil {
+		return v
+	}
+	return def
+}
+
+func varUnixSecondFilter(v int64, min, max int64) int64 {
+	if v < min {
+		v = min
+	} else if v > max {
+		v = max
+	}
+	return v
 }
