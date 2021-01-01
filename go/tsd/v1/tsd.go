@@ -134,6 +134,9 @@ func (it *CycleEntry) set(keys []int64, key, value int64, attrs uint64) {
 		if key >= keys[len(keys)-1] {
 			if u64Allow(it.Attrs|attrs, ValueAttrSum) {
 				it.Values[len(keys)-1] += value
+				if attrs > 0 {
+					it.Attrs |= attrs
+				}
 			} else {
 				it.Values[len(keys)-1] = value
 			}
@@ -178,6 +181,9 @@ func (it *CycleEntry) Sync(key, value int64, attrs uint64) {
 		if key == it.Keys[i] {
 			if u64Allow(it.Attrs|attrs, ValueAttrSum) {
 				it.Values[i] += value
+				if attrs > 0 {
+					it.Attrs |= attrs
+				}
 			} else {
 				it.Values[i] = value
 			}
