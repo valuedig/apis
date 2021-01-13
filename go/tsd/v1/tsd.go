@@ -199,8 +199,8 @@ func (it *CycleEntry) Sync(key, value int64, attrs uint64) {
 	it.Values = append(it.Values, value)
 
 	if len(it.Keys) > CycleKeysMax {
-		it.Keys = it.Keys[CycleKeysMax-len(it.Keys):]
-		it.Values = it.Keys[CycleKeysMax-len(it.Values):]
+		it.Keys = it.Keys[CycleKeysMax/10:]
+		it.Values = it.Values[CycleKeysMax/10:]
 	}
 }
 
