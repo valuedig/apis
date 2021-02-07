@@ -172,6 +172,10 @@ func (it *CycleEntry) Sync(key, value int64, attrs uint64) {
 	cycleEntryMU.Lock()
 	defer cycleEntryMU.Unlock()
 
+	if len(it.Keys) != len(it.Values) {
+		it.Keys, it.Values = nil, nil
+	}
+
 	for i := 0; i < len(it.Keys); i++ {
 
 		if key > it.Keys[i] {
