@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	CycleKeysMax                    = 100000
+	CycleKeysMax                    = 10000
 	CycleUnitMax              int64 = 3600
 	CycleUnitMin              int64 = 1
 	cycleExportOptionsTimeMax int64 = 31 * 86400
