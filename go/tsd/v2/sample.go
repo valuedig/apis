@@ -116,7 +116,8 @@ func (it *SampleSet) clean(force bool) {
 		p   *SamplePoint
 	)
 	for _, mf := range it.families {
-		for _, m := range mf.metrics {
+		dels := []string{}
+		for mname, m := range mf.metrics {
 			idx = -1
 			for idx, p = range m.points {
 				if p.time >= ttl {
@@ -127,6 +128,12 @@ func (it *SampleSet) clean(force bool) {
 				num += idx
 				m.points = m.points[idx:]
 			}
+			if len(m.points) <= 1 {
+				dels = append(dels, mname)
+			}
+		}
+		for _, mname := range dels {
+			delete(mf.metrics, mname)
 		}
 	}
 	it.cleanUpdated = tn.Unix()
