@@ -1,3 +1,17 @@
+// Copyright 2020 Eryx <evorui аt gmail dοt com>, All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package tsd
 
 import (
@@ -9,6 +23,7 @@ import (
 const (
 	defaultLabelName  = ""
 	defaultLabelValue = ""
+	maxEventQueue     = 1000
 )
 
 var (
@@ -23,10 +38,17 @@ type SampleSetter interface {
 }
 
 type SampleSet struct {
-	mu            sync.RWMutex
-	families      map[string]*SampleFamily
-	cleanInterval int64
-	cleanUpdated  int64
+	mu             sync.RWMutex
+	running        bool
+	events         chan *sampleMetricEvent
+	families       map[string]*SampleFamily
+	cleanInterval  int64
+	cleanUpdated   int64
+	instanceId     string
+	flushes        map[int64]uint32
+	storageFlushed int64
+	storageClient  MetricStorage
+	close          bool
 }
 
 type SampleFamily struct {
@@ -42,14 +64,26 @@ type SampleMetric struct {
 	points     []*SamplePoint
 }
 
+type sampleMetricEvent struct {
+	metricName string
+	labelName  string
+	labelValue string
+	delta      bool
+	count      int64
+	sum        int64
+}
+
+type sampleSetter struct {
+	set        *SampleSet
+	metricName string
+	labelName  string
+	labelValue string
+}
+
 type SamplePoint struct {
 	count int64
 	sum   int64
 	time  int64
-}
-
-type multiPointsSetter struct {
-	points []*SamplePoint
 }
 
 func init() {
@@ -57,44 +91,74 @@ func init() {
 }
 
 func NewSampler() *SampleSet {
-	return &SampleSet{
+	set := &SampleSet{
+		events:        make(chan *sampleMetricEvent, 2*maxEventQueue),
 		families:      map[string]*SampleFamily{},
 		cleanInterval: 3600,
 		cleanUpdated:  timesec(),
+		flushes:       map[int64]uint32{},
+		close:         false,
 	}
+	go set.run()
+	return set
 }
 
 func (it *SampleSet) Metric(name string) SampleSetter {
-	return it.getFamily(name, MetricType_UNTYPED)
+	return &sampleSetter{
+		set:        it,
+		metricName: name,
+	}
 }
 
-func (it *SampleSet) Gauge(name string) SampleSetter {
-	return it.getFamily(name, MetricType_GAUGE)
-}
-
-func (it *SampleSet) Delta(name string) SampleSetter {
-	return it.getFamily(name, MetricType_DELTA)
-}
-
-func (it *SampleSet) getFamily(name string, typ MetricType) *SampleFamily {
+func (it *SampleSet) run() {
 
 	it.mu.Lock()
-	defer it.mu.Unlock()
 
+	if it.running {
+		it.mu.Unlock()
+		return
+	}
+
+	it.running = true
 	if it.families == nil {
 		it.families = map[string]*SampleFamily{}
 	}
 
-	it.clean(false)
+	it.mu.Unlock()
 
-	mf, ok := it.families[name]
-	if !ok {
-		mf = &SampleFamily{
-			name: name,
+	for !it.close {
+
+		ev := <-it.events
+		if ev == nil {
+			break
 		}
-		it.families[name] = mf
+
+		tn := timesec()
+
+		mf, ok := it.families[ev.metricName]
+		if !ok {
+			mf = &SampleFamily{
+				name: ev.metricName,
+			}
+			it.families[ev.metricName] = mf
+		}
+
+		p := mf.getEntry(ev.labelName, ev.labelValue).point(tn)
+		if ev.delta {
+			if ev.count != 0 {
+				atomic.AddInt64(&p.count, ev.count)
+			}
+			if ev.sum != 0 {
+				atomic.AddInt64(&p.sum, ev.sum)
+			}
+		} else {
+			atomic.StoreInt64(&p.count, ev.count)
+			atomic.StoreInt64(&p.sum, ev.sum)
+		}
+
+		it.clean(false)
+		it.flush(false)
 	}
-	return mf
 }
 
 func (it *SampleSet) clean(force bool) {
@@ -115,6 +179,7 @@ func (it *SampleSet) clean(force bool) {
 		idx = 0
 		p   *SamplePoint
 	)
+
 	for _, mf := range it.families {
 		dels := []string{}
 		for mname, m := range mf.metrics {
@@ -136,6 +201,7 @@ func (it *SampleSet) clean(force bool) {
 			delete(mf.metrics, mname)
 		}
 	}
+
 	it.cleanUpdated = tn.Unix()
 }
 
@@ -147,8 +213,8 @@ func (it *SampleFamily) getEntry(labelName, labelValue string) *SampleMetric {
 
 	labelKey := labelName + "/" + labelValue
 
-	it.mu.Lock()
-	defer it.mu.Unlock()
+	// it.mu.Lock()
+	// defer it.mu.Unlock()
 
 	if it.metrics == nil {
 		it.metrics = map[string]*SampleMetric{}
@@ -166,42 +232,9 @@ func (it *SampleFamily) getEntry(labelName, labelValue string) *SampleMetric {
 	return s
 }
 
-func (it *SampleFamily) Inc(i int64) {
-	it.getEntry(defaultLabelName, defaultLabelValue).point(timesec()).Inc(i)
-}
-
-func (it *SampleFamily) Add(v int64) {
-	it.getEntry(defaultLabelName, defaultLabelValue).point(timesec()).Add(v)
-}
-
-func (it *SampleFamily) Set(i, v int64) {
-	it.getEntry(defaultLabelName, defaultLabelValue).point(timesec()).Set(i, v)
-}
-
-func (it *SampleFamily) With(m map[string]string) SampleSetter {
-
-	e := &multiPointsSetter{}
-	if m == nil {
-		return e
-	}
-	tn := timesec()
-
-	for k, v := range m {
-
-		if !LabelNameRX.MatchString(k) ||
-			!LabelValueRX.MatchString(v) {
-			continue
-		}
-
-		e.points = append(e.points, it.getEntry(k, v).point(tn))
-	}
-
-	return e
-}
-
 func (it *SampleMetric) point(tn int64) *SamplePoint {
-	it.mu.Lock()
-	defer it.mu.Unlock()
+	// it.mu.Lock()
+	// defer it.mu.Unlock()
 	if len(it.points) == 0 || it.points[len(it.points)-1].time < tn {
 		it.points = append(it.points, &SamplePoint{
 			time: tn,
@@ -210,7 +243,6 @@ func (it *SampleMetric) point(tn int64) *SamplePoint {
 	return it.points[len(it.points)-1]
 }
 
-//
 func (it *SamplePoint) Inc(v int64) {
 	atomic.AddInt64(&it.count, v)
 }
@@ -225,112 +257,40 @@ func (it *SamplePoint) Set(c int64, v int64) {
 	atomic.StoreInt64(&it.sum, v)
 }
 
-//
-func (it *multiPointsSetter) Inc(v int64) {
-	for _, p := range it.points {
-		p.Inc(v)
+func (it *sampleSetter) Inc(v int64) {
+	it.add(v, 0, true)
+}
+
+func (it *sampleSetter) Add(v int64) {
+	it.add(1, v, true)
+}
+
+func (it *sampleSetter) Set(count, sum int64) {
+	it.add(count, sum, false)
+}
+
+func (it *sampleSetter) add(count, sum int64, delta bool) {
+	if len(it.set.events) > maxEventQueue {
+		return
+	}
+	it.set.events <- &sampleMetricEvent{
+		metricName: it.metricName,
+		labelName:  it.labelName,
+		labelValue: it.labelValue,
+		delta:      delta,
+		count:      count,
+		sum:        sum,
 	}
 }
 
-func (it *multiPointsSetter) Add(v int64) {
-	for _, p := range it.points {
-		p.Add(v)
+func (it *sampleSetter) With(m map[string]string) SampleSetter {
+	for k, v := range m {
+		if !LabelNameRX.MatchString(k) ||
+			!LabelValueRX.MatchString(v) {
+			// continue
+		}
+		it.labelName = k
+		it.labelValue = v
 	}
-}
-
-func (it *multiPointsSetter) Set(count int64, sum int64) {
-	for _, p := range it.points {
-		p.Set(count, sum)
-	}
-}
-
-func (it *multiPointsSetter) With(m map[string]string) SampleSetter {
 	return it
-}
-
-func (it *SampleSet) Load(b []byte) error {
-
-	it.mu.Lock()
-	defer it.mu.Unlock()
-
-	var ms MetricSet
-	if err := StdProto.Decode(b, &ms); err != nil {
-		return err
-	}
-
-	var m2 *SampleMetric
-	it.families = map[string]*SampleFamily{}
-
-	for _, m := range ms.Metrics {
-		mf, ok := it.families[m.Name]
-		if !ok {
-			mf = &SampleFamily{
-				name: m.Name,
-			}
-			it.families[m.Name] = mf
-		}
-
-		if len(m.Labels) > 0 {
-			for _, label := range m.Labels {
-				m2 = mf.getEntry(label.Name, label.Value)
-				if m2 != nil {
-					m2.labelName = label.Name
-					m2.labelValue = label.Value
-					break
-				}
-			}
-		} else {
-			m2 = mf.getEntry("", "")
-		}
-
-		if m2 == nil {
-			continue
-		}
-		for _, v := range m.Points {
-			m2.points = append(m2.points, &SamplePoint{
-				count: v.Count,
-				sum:   v.Sum,
-				time:  v.Time,
-			})
-		}
-	}
-
-	return nil
-}
-
-func (it *SampleSet) Dump() ([]byte, error) {
-
-	it.mu.Lock()
-	defer it.mu.Unlock()
-
-	it.clean(true)
-
-	ms := &MetricSet{}
-
-	for name, family := range it.families {
-		for _, m := range family.metrics {
-			m2 := &Metric{
-				Name: name,
-			}
-			if m.labelName != "" {
-				m2.Labels = append(m2.Labels, &MetricLabel{
-					Name:  m.labelName,
-					Value: m.labelValue,
-				})
-			}
-			for _, p := range m.points {
-				m2.Points = append(m2.Points, &MetricPoint{
-					Count: p.count,
-					Sum:   p.sum,
-					Time:  p.time,
-				})
-			}
-			ms.Metrics = append(ms.Metrics, m2)
-		}
-	}
-	return StdProto.Encode(ms)
-}
-
-func timesec() int64 {
-	return time.Now().Unix()
 }

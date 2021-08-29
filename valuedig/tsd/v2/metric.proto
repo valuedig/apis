@@ -31,8 +31,16 @@ message MetricSet {
   repeated MetricFamily families = 6;
   message Status {
     int64 alignment_period = 3;
+    int64 last_time_range = 4;
   }
   Status status = 7;
+}
+
+message MetricStorageSet {
+  string instance_id = 1;
+  int64 time_bucket = 2;
+  int64 alignment_period = 3;
+  repeated Metric metrics = 5;
 }
 
 message MetricFamily {

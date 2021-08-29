@@ -1,10 +1,25 @@
+// Copyright 2020 Eryx <evorui аt gmail dοt com>, All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package tsd
 
 import (
-	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hooto/hlog4g/hlog"
 )
 
 var (
@@ -145,16 +160,18 @@ func (it *SampleSet) Query(req *SampleQueryRequest) (*MetricSet, error) {
 
 	req.reset()
 
-	ms := &MetricSet{}
+	ms := &MetricSet{
+		Status: &MetricSet_Status{
+			AlignmentPeriod: req.AlignmentPeriod,
+		},
+	}
 
 	if len(req.Metrics) == 0 {
 		return ms, nil
 	}
 
 	var (
-		tn        = timesec()
-		reqMetric *SampleQueryRequest_Metric
-		ok        bool
+		tn = timesec()
 	)
 
 	for st := req.StartTime; st <= req.EndTime; st += req.AlignmentPeriod {
@@ -171,8 +188,26 @@ func (it *SampleSet) Query(req *SampleQueryRequest) (*MetricSet, error) {
 		}
 	}
 
+	if len(ms.TimeBuckets) < 1 {
+		return ms, nil
+	}
+
+	if ms.TimeBuckets[0] < (tn-it.cleanInterval) && it.storageClient != nil {
+		return it.dbQuery(ms, req)
+	}
+
+	return it.memQuery(ms, req)
+}
+
+func (it *SampleSet) memQuery(ms *MetricSet, req *SampleQueryRequest) (*MetricSet, error) {
+
 	it.mu.RLock()
 	defer it.mu.RUnlock()
+
+	var (
+		reqMetric *SampleQueryRequest_Metric
+		ok        bool
+	)
 
 	for name, family := range it.families {
 
@@ -250,32 +285,127 @@ func (it *SampleSet) Query(req *SampleQueryRequest) (*MetricSet, error) {
 				case MetricType_DELTA:
 					p.Value = p.Count
 				}
-
-				// p.Count = 0
-				// p.Sum = 0
 			}
 
 			ms.Metrics = append(ms.Metrics, m)
 		}
 	}
 
-	sort.Slice(ms.Metrics, func(i, j int) bool {
-		cmp := strings.Compare(ms.Metrics[i].Name, ms.Metrics[j].Name)
-		if cmp != 0 {
-			return cmp < 0
+	ms.Metrics = metricsSort(ms.Metrics)
+
+	return ms, nil
+}
+
+func (it *SampleSet) dbQuery(ms *MetricSet, req *SampleQueryRequest) (*MetricSet, error) {
+
+	var (
+		tl          = ms.TimeBuckets[0]
+		tr          = ms.TimeBuckets[len(ms.TimeBuckets)-1]
+		stl, str    = sampleStorageTimeBucketAlign(tl-req.AlignmentPeriod, tr)
+		keyOffset   = storageKeyEncode(it.instanceId, stl)
+		keyCutset   = storageKeyEncode(it.instanceId, str)
+		reqMetric   *SampleQueryRequest_Metric
+		ok          bool
+		statsBytes  = 0
+		statsPoint  = 0
+		statsMetric = 0
+	)
+
+	if rs, err := it.storageClient.Scan(keyOffset, keyCutset); err == nil {
+
+		for _, bs := range rs {
+
+			var set MetricStorageSet
+
+			if err := StdProto.Decode(bs, &set); err != nil {
+				continue
+			}
+
+			for _, v := range set.Metrics {
+
+				reqMetric, ok = req.Metrics[v.Name]
+				if !ok {
+					continue
+				}
+
+				labelName, labelValue := "", ""
+				if len(v.Labels) > 0 {
+					labelName, labelValue = v.Labels[0].Name, v.Labels[0].Value
+				}
+
+				if !reqMetric.labelMatch(labelName, labelValue) {
+					continue
+				}
+
+				switch reqMetric.Type {
+
+				case MetricType_UNTYPED, MetricType_GAUGE, MetricType_DELTA:
+
+				default:
+					continue
+				}
+
+				m := ms.getMetric(v.Name, labelName, labelValue)
+
+				if len(m.Points) == 0 {
+					for _, _ = range ms.TimeBuckets {
+						m.Points = append(m.Points, &MetricPoint{
+							// Time: t,
+						})
+					}
+				}
+
+				offset := 0
+				for _, p := range v.Points {
+
+					if offset >= len(m.Points) {
+						break
+					}
+
+					if (p.Time + req.AlignmentPeriod) < ms.TimeBuckets[offset] {
+						continue
+					}
+
+					for offset < len(m.Points) && p.Time > ms.TimeBuckets[offset] {
+						offset++
+					}
+
+					if offset >= len(m.Points) {
+						break
+					}
+
+					m.Points[offset].Count += p.Count
+					m.Points[offset].Sum += p.Sum
+
+					statsPoint++
+				}
+
+				for _, p := range m.Points {
+
+					switch reqMetric.Type {
+
+					case MetricType_UNTYPED, MetricType_GAUGE:
+						if p.Count > 1 {
+							p.Value = p.Sum / p.Count
+						} else {
+							p.Value = p.Sum
+						}
+
+					case MetricType_DELTA:
+						p.Value = p.Count
+					}
+				}
+
+				statsMetric++
+			}
+			statsBytes += len(bs)
 		}
-		m1 := ms.Metrics[i]
-		m2 := ms.Metrics[j]
-		if len(m1.Labels) == 0 || len(m1.Labels) < len(m2.Labels) {
-			return true
-		}
-		cmp = strings.Compare(m1.Labels[0].Name, m2.Labels[0].Name)
-		if cmp != 0 {
-			return cmp < 0
-		}
-		cmp = strings.Compare(m1.Labels[0].Value, m2.Labels[0].Value)
-		return cmp < 0
-	})
+	}
+
+	hlog.Printf("info", "metric/storage query metrics %d, points %d, bytes %d",
+		statsMetric, statsPoint, statsBytes)
+
+	ms.Metrics = metricsSort(ms.Metrics)
 
 	return ms, nil
 }
