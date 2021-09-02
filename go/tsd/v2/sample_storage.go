@@ -224,7 +224,7 @@ func (it *SampleSet) flush(force bool) error {
 		}
 
 		if err := it.storageClient.Put(storageKeyEncode(it.instanceId, t), bs); err == nil {
-			hlog.Printf("info", "instance %s, time bucket %d, flush %d bytes, sumcheck %d",
+			hlog.Printf("debug", "instance %s, time bucket %d, flush %d bytes, sumcheck %d",
 				it.instanceId, t, len(bs), csum)
 			it.flushes[t] = csum
 		} else {
