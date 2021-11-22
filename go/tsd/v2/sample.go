@@ -76,8 +76,7 @@ type sampleMetricEvent struct {
 type sampleSetter struct {
 	set        *SampleSet
 	metricName string
-	labelName  string
-	labelValue string
+	labels     []string
 }
 
 type SamplePoint struct {
@@ -273,24 +272,39 @@ func (it *sampleSetter) add(count, sum int64, delta bool) {
 	if len(it.set.events) > maxEventQueue {
 		return
 	}
-	it.set.events <- &sampleMetricEvent{
-		metricName: it.metricName,
-		labelName:  it.labelName,
-		labelValue: it.labelValue,
-		delta:      delta,
-		count:      count,
-		sum:        sum,
+	if len(it.labels) > 1 {
+		for i := 1; i < len(it.labels); i += 2 {
+			it.set.events <- &sampleMetricEvent{
+				metricName: it.metricName,
+				labelName:  it.labels[i-1],
+				labelValue: it.labels[i],
+				delta:      delta,
+				count:      count,
+				sum:        sum,
+			}
+		}
+	} else {
+		it.set.events <- &sampleMetricEvent{
+			metricName: it.metricName,
+			delta:      delta,
+			count:      count,
+			sum:        sum,
+		}
 	}
 }
 
 func (it *sampleSetter) With(m map[string]string) SampleSetter {
+	setter := &sampleSetter{
+		metricName: it.metricName,
+		set:        it.set,
+	}
 	for k, v := range m {
 		if !LabelNameRX.MatchString(k) ||
 			!LabelValueRX.MatchString(v) {
-			// continue
+			continue
 		}
-		it.labelName = k
-		it.labelValue = v
+		setter.labels = append(setter.labels, k)
+		setter.labels = append(setter.labels, v)
 	}
-	return it
+	return setter
 }

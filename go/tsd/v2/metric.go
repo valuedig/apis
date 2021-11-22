@@ -21,8 +21,8 @@ import (
 )
 
 var (
-	MetricNameRX = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9\-\_]{0,48}([a-zA-Z0-9])`)
-	LabelNameRX  = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9\-\_]{0,48}([a-zA-Z0-9])`)
+	MetricNameRX = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9\.\-\_]{0,48}([a-zA-Z0-9])`)
+	LabelNameRX  = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9\.\-\_]{0,48}([a-zA-Z0-9])`)
 	LabelValueRX = regexp.MustCompile(`[a-zA-Z0-9\.\/\-\_]{0,50}([*]?)`)
 )
 
@@ -79,8 +79,11 @@ func metricsSort(metrics []*Metric) []*Metric {
 		}
 		m1 := metrics[i]
 		m2 := metrics[j]
-		if len(m1.Labels) == 0 || len(m1.Labels) < len(m2.Labels) {
+		if len(m1.Labels) == 0 {
 			return true
+		}
+		if len(m2.Labels) == 0 {
+			return false
 		}
 		cmp = strings.Compare(m1.Labels[0].Name, m2.Labels[0].Name)
 		if cmp != 0 {
