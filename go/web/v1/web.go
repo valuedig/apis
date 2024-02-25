@@ -37,12 +37,18 @@ func UrlKey(u string) string {
 		uo.Host = uo.Host[:n]
 	}
 
-	rs := "page/" + uo.Host + p
+	ar := strings.Split(uo.Host, ".")
+	for i := 0; i < (len(ar) / 2); i++ {
+		ar[i], ar[len(ar)-i-1] = ar[len(ar)-i-1], ar[i]
+	}
+
+	rs := "web/" + strings.Join(ar, ".") + p
 
 	if uo.RawQuery != "" {
 		rs += "?" + uo.RawQuery
 	}
 
+	return rs
 	return strings.ToLower(rs)
 }
 

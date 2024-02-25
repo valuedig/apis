@@ -41,11 +41,11 @@ func (c HttpService) QueryAction() {
 	}
 }
 
-func NewHttpServiceModule() httpsrv.Module {
+func NewHttpServiceModule() *httpsrv.Module {
 
-	module := httpsrv.NewModule("valuedig_apis_tsd_v2")
+	module := httpsrv.NewModule()
 
-	module.ControllerRegister(new(Metric))
+	module.RegisterController(new(Metric))
 
 	return module
 }
